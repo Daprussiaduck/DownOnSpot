@@ -8,8 +8,10 @@ use librespot::core::audio_key::AudioKey;
 use librespot::core::session::Session;
 use librespot::core::spotify_id::SpotifyId;
 use librespot::metadata::{FileFormat, Metadata, Track};
+use reqwest::StatusCode;
 use sanitize_filename::sanitize;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokio::fs::File;
@@ -358,15 +360,15 @@ impl DownloaderInternal {
 			filename_template = filename_template.replace(tag, &value);
 			path_template = path_template.replace(tag, &value);
 		}
-		let path = Path::new(&path_template).join(&filename_template);
+		let path_stem = Path::new(&path_template).join(&filename_template);
 
-		tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+		tokio::fs::create_dir_all(path_stem.parent().unwrap()).await?;
 
 		// Download
 		let (path, format) = DownloaderInternal::download_track(
 			&self.spotify.session,
 			&job.track_id,
-			path,
+			&path_stem,
 			config.clone(),
 			self.event_tx.clone(),
 			job.id,
@@ -413,12 +415,22 @@ impl DownloaderInternal {
 			(Field::Label, vec![album.label.to_string()]),
 		];
 		let date = album.release_date;
+
+		let download_lrc = config.download_lrc;
+		let enhanced_lrc = config.enhanced_lrc;
+
 		// Write tags
 		let config = config.clone();
 		tokio::task::spawn_blocking(move || {
 			DownloaderInternal::write_tags(path, format, tags, date, cover, config)
 		})
 		.await??;
+
+		// Download LRC
+		if download_lrc {
+			DownloaderInternal::download_lrc(path_stem, &track.external_ids["isrc"], enhanced_lrc)
+				.await?;
+		}
 
 		// Done
 		self.event_tx
@@ -440,6 +452,109 @@ impl DownloaderInternal {
 			.to_string();
 		let data = res.bytes().await?.to_vec();
 		Ok((mime, data))
+	}
+
+	// Download synced lyrics from surfbryce's backend and save as LRC format
+	async fn download_lrc(
+		path: impl AsRef<Path>,
+		isrc: &str,
+		enhanced_lrc: bool,
+	) -> Result<(), SpotifyError> {
+		let url = format!(
+			"https://beautiful-lyrics.socalifornian.live/lyrics/{}",
+			isrc
+		);
+
+		let client = reqwest::Client::new();
+		let lyrics = client.get(url).send().await?;
+
+		if lyrics.content_length().unwrap() == 0 {
+			warn!("Lyrics not found!");
+			return Ok(());
+		} else if lyrics.status() != StatusCode::OK {
+			return Err(SpotifyError::Error(format!(
+				"Failed to fetch lyrics! {}",
+				lyrics.status()
+			)));
+		}
+
+		let lyric_json: Value = serde_json::from_str(&lyrics.text().await?).unwrap();
+
+		// Convert response JSON to LRC
+		let mut lrc_text = String::new();
+		match lyric_json["Type"].as_str().unwrap() {
+			"Syllable" => {
+				// Enhanced LRC format
+				for line in lyric_json["VocalGroups"].as_array().unwrap() {
+					let line_ts = (line["StartTime"].as_f64().unwrap() * 1000.0) as u64;
+					let line_ts_min = line_ts / 60000;
+					let line_ts_sec = (line_ts % 60000) / 1000;
+					let line_ts_ms = (line_ts % 1000) / 10; // Truncated to 2 digits
+
+					lrc_text.push_str(&format!(
+						"[{:02}:{:02}.{:02}]",
+						line_ts_min, line_ts_sec, line_ts_ms
+					));
+					for syllable in line["Lead"].as_array().unwrap() {
+						let syllable_ts = (syllable["StartTime"].as_f64().unwrap() * 1000.0) as u64;
+						let syllable_ts_min = syllable_ts / 60000;
+						let syllable_ts_sec = (syllable_ts % 60000) / 1000;
+						let syllable_ts_ms = (syllable_ts % 100) / 10;
+
+						// Add syllable timestamps if enhanced lrc is enabled
+						if enhanced_lrc {
+							lrc_text.push_str(&format!(
+								"<{:02}:{:02}.{:02}>",
+								syllable_ts_min, syllable_ts_sec, syllable_ts_ms,
+							));
+						}
+
+						lrc_text.push_str(syllable["Text"].as_str().unwrap());
+
+						if !syllable["IsPartOfWord"].as_bool().unwrap() {
+							lrc_text.push(' ');
+						}
+					}
+
+					lrc_text.push('\n');
+				}
+			}
+			"Line" => {
+				for line in lyric_json["VocalGroups"].as_array().unwrap() {
+					let ts = (line["StartTime"].as_f64().unwrap() * 1000.0) as u64;
+					let ts_min = ts / 60000;
+					let ts_sec = (ts % 60000) / 1000;
+					let ts_ms = (ts % 1000) / 10; // Truncated to 2 digits
+
+					let text = line["Text"].as_str().unwrap();
+
+					lrc_text.push_str(&format!(
+						"[{:02}:{:02}.{:02}]{}\n",
+						ts_min, ts_sec, ts_ms, text
+					))
+				}
+			}
+			"Static" => {
+				for line in lyric_json["Lines"].as_array().unwrap() {
+					let text = line["Text"].as_str().unwrap();
+					lrc_text.push_str(&format!("{}\n", text));
+				}
+			}
+			_ => {
+				println!(
+					"Unknown lyric type {}",
+					lyric_json["Type"].as_str().unwrap()
+				);
+				return Ok(());
+			}
+		}
+
+		// Save LRC to path_stem + ".lrc"
+		let path = format!("{}.lrc", path.as_ref().to_str().unwrap());
+		let mut file = File::create(&path).await?;
+		file.write_all(lrc_text.as_bytes()).await?;
+
+		Ok(())
 	}
 
 	/// Write tags to file ( BLOCKING )
@@ -870,6 +985,8 @@ pub struct DownloaderConfig {
 	pub convert_to_mp3: bool,
 	pub separator: String,
 	pub skip_existing: bool,
+	pub download_lrc: bool,
+	pub enhanced_lrc: bool,
 }
 
 impl DownloaderConfig {
@@ -884,6 +1001,8 @@ impl DownloaderConfig {
 			convert_to_mp3: false,
 			separator: ", ".to_string(),
 			skip_existing: true,
+			download_lrc: false,
+			enhanced_lrc: true,
 		}
 	}
 }
