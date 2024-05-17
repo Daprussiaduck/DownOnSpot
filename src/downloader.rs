@@ -1,6 +1,5 @@
 use async_std::channel::{bounded, Receiver, Sender};
 use async_stream::try_stream;
-use chrono::NaiveDate;
 use futures::stream::FuturesUnordered;
 use futures::{pin_mut, select, FutureExt, Stream, StreamExt};
 use librespot::audio::{AudioDecrypt, AudioFile};
@@ -9,6 +8,8 @@ use librespot::core::session::Session;
 use librespot::core::spotify_id::SpotifyId;
 use librespot::metadata::{FileFormat, Metadata, Track};
 use reqwest::StatusCode;
+use rspotify::clients::BaseClient;
+use rspotify::model::{Id, TrackId};
 use sanitize_filename::sanitize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,17 +89,17 @@ impl Downloader {
 		match item {
 			SpotifyItem::Track(t) => self.add_to_queue(t.into()).await,
 			SpotifyItem::Album(a) => {
-				let tracks = self.spotify.full_album(&a.id).await?;
+				let tracks = self.spotify.full_album(a.id.id()).await?;
 				let queue: Vec<Download> = tracks.into_iter().map(|t| t.into()).collect();
 				self.add_to_queue_multiple(queue).await;
 			}
 			SpotifyItem::Playlist(p) => {
-				let tracks = self.spotify.full_playlist(&p.id).await?;
+				let tracks = self.spotify.full_playlist(p.id.id()).await?;
 				let queue: Vec<Download> = tracks.into_iter().map(|t| t.into()).collect();
 				self.add_to_queue_multiple(queue).await;
 			}
 			SpotifyItem::Artist(a) => {
-				let tracks = self.spotify.full_artist(&a.id).await?;
+				let tracks = self.spotify.full_artist(a.id.id()).await?;
 				let queue: Vec<Download> = tracks.into_iter().map(|t| t.into()).collect();
 				self.add_to_queue_multiple(queue).await;
 			}
@@ -280,21 +281,18 @@ impl DownloaderInternal {
 		job: DownloadJob,
 		config: DownloaderConfig,
 	) -> Result<(), SpotifyError> {
+		self.spotify.spotify.request_token().await?;
 		// Fetch metadata
 		let track = self
 			.spotify
 			.spotify
-			.tracks()
-			.get_track(&job.track_id, None)
-			.await?
-			.data;
+			.track(TrackId::from_id(&job.track_id).unwrap(), None)
+			.await?;
 		let album = self
 			.spotify
 			.spotify
-			.albums()
-			.get_album(&track.album.id.ok_or(SpotifyError::Unavailable)?, None)
-			.await?
-			.data;
+			.album(track.album.id.unwrap(), None)
+			.await?;
 
 		let tags: Vec<(&str, String)> = vec![
 			("%title%", sanitize(&track.name)),
@@ -412,11 +410,12 @@ impl DownloaderInternal {
 			(Field::TrackNumber, vec![track.track_number.to_string()]),
 			(Field::DiscNumber, vec![track.disc_number.to_string()]),
 			(Field::Genre, album.genres.clone()),
-			(Field::Label, vec![album.label.to_string()]),
+			(Field::Label, vec![album.label.unwrap().to_string()]),
 		];
 		let date = album.release_date;
 
 		let download_lrc = config.download_lrc;
+		let sp_dc = &config.sp_dc;
 		let enhanced_lrc = config.enhanced_lrc;
 
 		// Write tags
@@ -428,8 +427,13 @@ impl DownloaderInternal {
 
 		// Download LRC
 		if download_lrc {
-			DownloaderInternal::download_lrc(path_stem, &track.external_ids["isrc"], enhanced_lrc)
-				.await?;
+			DownloaderInternal::download_lrc(
+				path_stem,
+				track.id.unwrap().id(),
+				sp_dc,
+				enhanced_lrc,
+			)
+			.await?;
 		}
 
 		// Done
@@ -457,18 +461,42 @@ impl DownloaderInternal {
 	// Download synced lyrics from surfbryce's backend and save as LRC format
 	async fn download_lrc(
 		path: impl AsRef<Path>,
-		isrc: &str,
+		id: &str,
+		sp_dc: &str,
 		enhanced_lrc: bool,
 	) -> Result<(), SpotifyError> {
-		let url = format!(
-			"https://beautiful-lyrics.socalifornian.live/lyrics/{}",
-			isrc
-		);
-
+		let url = format!("https://beautiful-lyrics.socalifornian.live/lyrics/{}", id);
 		let client = reqwest::Client::new();
-		let lyrics = client.get(url).send().await?;
 
-		if lyrics.content_length().unwrap() == 0 {
+		let token_res = client
+			.get("https://open.spotify.com/get_access_token")
+            .header("Accept", "application/json")
+            .header("User-Agent", "User-Agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.0.0 Safari/537.36")
+			.header("Cookie", format!("sp_dc={}", sp_dc))
+			.send()
+			.await?;
+
+		if token_res.status() != StatusCode::OK {
+			return Err(SpotifyError::Error(format!(
+				"Failed to get token! {}",
+				token_res.status(),
+			)));
+		}
+
+		let token: Value = serde_json::from_str(&token_res.text().await?).unwrap();
+
+		let lyrics = client
+			.get(url)
+			.header(
+				"Authorization",
+				format!("Bearer {}", token["accessToken"].as_str().unwrap()),
+			)
+			.send()
+			.await?;
+
+		if lyrics.content_length().unwrap() == 0
+			|| lyrics.status() == StatusCode::INTERNAL_SERVER_ERROR
+		{
 			warn!("Lyrics not found!");
 			return Ok(());
 		} else if lyrics.status() != StatusCode::OK {
@@ -484,9 +512,8 @@ impl DownloaderInternal {
 		let mut lrc_text = String::new();
 		match lyric_json["Type"].as_str().unwrap() {
 			"Syllable" => {
-				// Enhanced LRC format
-				for line in lyric_json["VocalGroups"].as_array().unwrap() {
-					let line_ts = (line["StartTime"].as_f64().unwrap() * 1000.0) as u64;
+				for line in lyric_json["Content"].as_array().unwrap() {
+					let line_ts = (line["Lead"]["StartTime"].as_f64().unwrap() * 1000.0) as u64;
 					let line_ts_min = line_ts / 60000;
 					let line_ts_sec = (line_ts % 60000) / 1000;
 					let line_ts_ms = (line_ts % 1000) / 10; // Truncated to 2 digits
@@ -495,7 +522,7 @@ impl DownloaderInternal {
 						"[{:02}:{:02}.{:02}]",
 						line_ts_min, line_ts_sec, line_ts_ms
 					));
-					for syllable in line["Lead"].as_array().unwrap() {
+					for syllable in line["Lead"]["Syllables"].as_array().unwrap() {
 						let syllable_ts = (syllable["StartTime"].as_f64().unwrap() * 1000.0) as u64;
 						let syllable_ts_min = syllable_ts / 60000;
 						let syllable_ts_sec = (syllable_ts % 60000) / 1000;
@@ -520,7 +547,7 @@ impl DownloaderInternal {
 				}
 			}
 			"Line" => {
-				for line in lyric_json["VocalGroups"].as_array().unwrap() {
+				for line in lyric_json["Content"].as_array().unwrap() {
 					let ts = (line["StartTime"].as_f64().unwrap() * 1000.0) as u64;
 					let ts_min = ts / 60000;
 					let ts_sec = (ts % 60000) / 1000;
@@ -541,11 +568,10 @@ impl DownloaderInternal {
 				}
 			}
 			_ => {
-				println!(
+				return Err(SpotifyError::Error(format!(
 					"Unknown lyric type {}",
 					lyric_json["Type"].as_str().unwrap()
-				);
-				return Ok(());
+				)))
 			}
 		}
 
@@ -562,7 +588,7 @@ impl DownloaderInternal {
 		path: impl AsRef<Path>,
 		format: AudioFormat,
 		tags: Vec<(Field, Vec<String>)>,
-		date: NaiveDate,
+		date: String,
 		cover: Option<(String, Vec<u8>)>,
 		config: DownloaderConfig,
 	) -> Result<(), SpotifyError> {
@@ -577,7 +603,7 @@ impl DownloaderInternal {
 		for (field, value) in tags {
 			tag.set_field(field, value);
 		}
-		tag.set_release_date(date);
+		tag.set_release_date(&date);
 		// Cover
 		if let Some((mime, data)) = cover {
 			tag.add_cover(&mime, data);
@@ -893,21 +919,21 @@ pub struct SearchResult {
 	pub title: String,
 }
 
-impl From<aspotify::Track> for SearchResult {
-	fn from(val: aspotify::Track) -> Self {
+impl From<rspotify::model::FullTrack> for SearchResult {
+	fn from(val: rspotify::model::FullTrack) -> Self {
 		SearchResult {
-			track_id: val.id.unwrap(),
+			track_id: val.id.unwrap().id().to_string(),
 			author: val.artists[0].name.to_owned(),
 			title: val.name,
 		}
 	}
 }
 
-impl From<aspotify::Track> for Download {
-	fn from(val: aspotify::Track) -> Self {
+impl From<rspotify::model::FullTrack> for Download {
+	fn from(val: rspotify::model::FullTrack) -> Self {
 		Download {
 			id: 0,
-			track_id: val.id.unwrap(),
+			track_id: val.id.unwrap().id().to_string(),
 			title: val.name,
 			subtitle: val
 				.artists
@@ -919,11 +945,11 @@ impl From<aspotify::Track> for Download {
 	}
 }
 
-impl From<aspotify::TrackSimplified> for Download {
-	fn from(val: aspotify::TrackSimplified) -> Self {
+impl From<rspotify::model::SimplifiedTrack> for Download {
+	fn from(val: rspotify::model::SimplifiedTrack) -> Self {
 		Download {
 			id: 0,
-			track_id: val.id.unwrap(),
+			track_id: val.id.unwrap().id().to_string(),
 			title: val.name,
 			subtitle: val
 				.artists
@@ -986,6 +1012,7 @@ pub struct DownloaderConfig {
 	pub separator: String,
 	pub skip_existing: bool,
 	pub download_lrc: bool,
+	pub sp_dc: String,
 	pub enhanced_lrc: bool,
 }
 
@@ -1002,6 +1029,7 @@ impl DownloaderConfig {
 			separator: ", ".to_string(),
 			skip_existing: true,
 			download_lrc: false,
+			sp_dc: "https://github.com/akashrchandran/syrics/wiki/Finding-sp_dc".to_string(),
 			enhanced_lrc: true,
 		}
 	}

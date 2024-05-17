@@ -1,7 +1,7 @@
-use chrono::{Datelike, NaiveDate};
 use id3::frame::{Picture, PictureType, Timestamp};
 use id3::{Tag, TagLike, Version};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::error::SpotifyError;
 
@@ -72,14 +72,8 @@ impl super::Tag for ID3Tag {
 		});
 	}
 
-	fn set_release_date(&mut self, date: NaiveDate) {
-		self.tag.set_date_released(Timestamp {
-			year: date.year(),
-			month: Some(date.month() as u8),
-			day: Some(date.day() as u8),
-			hour: None,
-			minute: None,
-			second: None,
-		})
+	fn set_release_date(&mut self, date: &str) {
+		self.tag
+			.set_date_released(Timestamp::from_str(date).unwrap())
 	}
 }

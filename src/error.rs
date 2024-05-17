@@ -12,7 +12,7 @@ pub enum SpotifyError {
 	AudioKeyError,
 	LameConverterError(String),
 	JoinError,
-	ASpotify(String),
+	RSpotify(String),
 	Serde(String, usize, usize),
 	InvalidUri,
 	ParseError(url::ParseError),
@@ -36,7 +36,7 @@ impl fmt::Display for SpotifyError {
 			SpotifyError::AudioKeyError => write!(f, "Audio Key Error"),
 			SpotifyError::LameConverterError(e) => write!(f, "Lame error: {}", e),
 			SpotifyError::JoinError => write!(f, "Tokio Join Error"),
-			SpotifyError::ASpotify(e) => write!(f, "Spotify Error: {}", e),
+			SpotifyError::RSpotify(e) => write!(f, "Spotify Error: {}", e),
 			SpotifyError::Serde(e, l, c) => write!(f, "Serde Error @{}:{} {}", l, c, e),
 			SpotifyError::InvalidUri => write!(f, "Invalid URI"),
 			SpotifyError::ParseError(e) => write!(f, "Parse Error: {}", e),
@@ -99,9 +99,9 @@ impl From<tokio::task::JoinError> for SpotifyError {
 	}
 }
 
-impl From<aspotify::Error> for SpotifyError {
-	fn from(e: aspotify::Error) -> Self {
-		Self::ASpotify(e.to_string())
+impl From<rspotify::ClientError> for SpotifyError {
+	fn from(e: rspotify::ClientError) -> Self {
+		Self::RSpotify(e.to_string())
 	}
 }
 

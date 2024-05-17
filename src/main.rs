@@ -158,10 +158,8 @@ async fn start() {
 				for download in downloader.get_downloads().await {
 					let state = download.state;
 
-					let progress: String;
-
-					if state != DownloadState::Done {
-						progress = match state {
+					let progress = if state != DownloadState::Done {
+						match state {
 							DownloadState::Downloading(r, t) => {
 								exit_flag &= 0;
 								let p = r as f32 / t as f32 * 100.0;
@@ -183,10 +181,10 @@ async fn start() {
 								format!("{} ", e)
 							}
 							DownloadState::Done => "Impossible state".to_string(),
-						};
+						}
 					} else {
-						progress = "Done.".to_string();
-					}
+						"Done.".to_string()
+					};
 
 					println!("{:<19}| {}", progress, download.title);
 				}

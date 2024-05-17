@@ -3,8 +3,7 @@ use crate::error::SpotifyError;
 use serde::{Deserialize, Serialize};
 
 use tokio::{
-	fs::create_dir_all,
-	fs::File,
+	fs::{self, create_dir_all, File},
 	io::{AsyncReadExt, AsyncWriteExt},
 };
 
@@ -59,6 +58,11 @@ impl Settings {
 		let config_folder_path = get_config_folder_path();
 		create_dir_all(&config_folder_path).await?;
 		let config_file_path = config_folder_path.join("settings.json");
+
+		// Check if config file already exists and create a back up
+		if config_file_path.exists() {
+			fs::copy(&config_file_path, config_folder_path.join("settings.json.bak")).await?;
+		}
 
 		// Serialize the settings to a json file
 		let data = serde_json::to_string_pretty(self)?;
