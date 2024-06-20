@@ -128,7 +128,7 @@ See [this page](https://github.com/akashrchandran/syrics/wiki/Finding-sp_dc) to 
 
 - Can now receive playlists longer than 100 tracks
 - Local tracks don't cause a panic
-- HTTP 429 response mitigation with tracks already downloaded
+- HTTP 429 response mitigation with tracks already downloaded via timeouts
 
 ## 💪 Contributors
 
