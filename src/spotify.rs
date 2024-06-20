@@ -16,6 +16,30 @@ use url::Url;
 
 use crate::error::SpotifyError;
 
+use rspotify::ClientResult;
+use std::collections::HashMap;
+use rspotify::http::{BaseHttpClient, Query};
+use rspotify::model::Market;
+use serde::Deserialize;
+
+pub fn build_map_cpy<'key, 'value, const N: usize>(
+    array: [(&'key str, Option<&'value str>); N],
+) -> HashMap<&'key str, &'value str> {
+    // Use a manual for loop instead of iterators so we can call `with_capacity`
+    // and avoid reallocating.
+    let mut map = HashMap::with_capacity(N);
+    for (key, value) in array {
+        if let Some(value) = value {
+            map.insert(key, value);
+        }
+    }
+    map
+}
+
+pub(crate) fn convert_result_cpy<'a, T: Deserialize<'a>>(input: &'a str) -> ClientResult<T> {
+    serde_json::from_str::<T>(input).map_err(Into::into)
+}
+
 pub struct Spotify {
 	// librespotify sessopm
 	pub session: Session,
@@ -126,10 +150,13 @@ impl Spotify {
 
 	/// Get all tracks from playlist
 	pub async fn full_playlist(&self, id: &str) -> Result<Vec<FullTrack>, SpotifyError> {
-		Ok(self
+		// This is to get the entire playlist instead of just the first 100, as that is what the first request gives you to start with
+		let playlist = self // store playlist information for later
 			.spotify
 			.playlist(PlaylistId::from_id(id).unwrap(), None, None)
-			.await?
+			.await?;
+		let total_tracks = playlist.tracks.total; // Total number of tracks in playlist
+		let mut collected = playlist // The collection of tracks in memory (list gotten so far)
 			.tracks
 			.items
 			.into_iter()
@@ -137,8 +164,81 @@ impl Spotify {
 			.flat_map(|p_item| match p_item {
 				PlayableItem::Track(track) => Some(track),
 				_ => None,
-			})
-			.collect::<Vec<FullTrack>>())
+			}).collect::<Vec<FullTrack>>();
+
+		let mut attempts = 1; // Track number of requests
+
+		// If the playlist is less than 100 tracks, no need to loop for more
+		if playlist.tracks.next != None{
+			let mut _next = playlist
+				.tracks
+				.next
+				.unwrap();
+			// While the queue doesn't have all of the songs
+			while collected.len() < total_tracks.try_into().unwrap() {
+				attempts = attempts + 1;
+
+				// HTTP request for next 100 tracks
+				// Setup
+				let fields: Option<&str> = None;
+				let market: Option<Market> = None;
+				let params: HashMap<&str, &str> = build_map_cpy([
+					("fields", fields),
+					("market", market.map(Into::into))
+					]);
+				let payload: &Query<'_> = &params;
+				let headers = self
+					.spotify
+					.auth_headers()
+					.await?;
+				// Request and result
+				let mut result: String = self.
+					spotify
+					.get_http()
+					.get(&_next, Some(&headers), payload)
+					.await
+					.unwrap();
+
+				// This is to modify the response of the playlists track offset/limit request
+				// to be compliant for the JSON parsing that is expected for the FullPlaylist object
+				let tracks_temp = "{\"tracks\":";
+				result = tracks_temp.to_owned() + &result + 
+					", \"collaborative\" : " + &playlist.collaborative.to_string() +
+					", \"external_urls\": {" + "" + "}," + // TODO: add playlist's external_urls (no neat .to_string() method)
+					" \"followers\": {" +
+						"\"total\": " + &playlist.followers.total.to_string() + "}," + 
+					" \"id\": \"" + &id.to_string() + "\"," + 
+					"\"images\": [" + "" +"], " + // TODO: add playlist's images information (no neat .to_string() method)
+					"\"name\": \"" + &playlist.name.to_string() + "\"," +
+					"\"owner\": {" + // TODO: add playlist's owner information (no neat .to_string() method, and move issues)
+						"\"display_name\": \"" + "" + "\"," + 
+						" \"external_urls\":{" + "" + "}," + 
+						" \"href\":\"" + "" +"\"," + 
+						" \"id\":\"" + "" + "\"," + 
+						" \"images\": [" + "" + "]}," + 
+					" \"snapshot_id\": \"" + &playlist.snapshot_id.to_string() + "\"," + 
+					" \"href\": \"" + &_next +"\"}";
+
+        		let new_collect: ClientResult<FullPlaylist> = convert_result_cpy(&result); // The collection of tracks received from the next request
+				let modify = new_collect?; // a copy that we can modify
+				// The final response of the next item will have nothing, so don't unwrap
+				if modify.tracks.next != None {
+					_next = modify.tracks.next.unwrap();
+				}
+				let mut act_collect = modify
+					.tracks
+					.items
+					.into_iter()
+					.filter_map(|item| item.track)
+					.flat_map(|p_item| match p_item {
+						PlayableItem::Track(track) => Some(track),
+						_ => None,
+					}).collect::<Vec<FullTrack>>();
+				collected.append(&mut act_collect);
+			}
+		}	
+		println!("Found {} total songs to be downloaded, with {} put into the queue, and required {} requests", total_tracks, collected.len(), attempts);
+		Ok(collected)
 	}
 
 	/// Get all tracks from album

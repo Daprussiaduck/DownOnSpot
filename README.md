@@ -20,8 +20,8 @@ A Spotify downloader written in Rust
 ## 🆘 Help needed
 
 > [!NOTE]
-Currently, I am [rewriting DownOnSpot](https://github.com/oSumAtrIX/DownOnSpot/pull/68).  
-If you want to help me accelerate this process, please feel free to contact me at [osumatrix.me](https://osumatrix.me).
+> Currently, I am [rewriting DownOnSpot](https://github.com/oSumAtrIX/DownOnSpot/pull/68).
+> If you want to help me accelerate this process, please feel free to contact me at [osumatrix.me](https://osumatrix.me).
 
 ## ⭐ Features
 
@@ -46,13 +46,9 @@ If you want to help me accelerate this process, please feel free to contact me a
    git clone https://github.com/oSumAtrIX/DownOnSpot.git
    cd DownOnSpot
    ```
-
 2. Install dependencies
 
-   If you are on Linux, make sure you have the `libasound2-dev` package installed.  
-   Additionally, you need the [libmp3lame](https://www.rarewares.org/mp3-lame-libraries.php#libmp3lame) library.  
-   On Mac OS, run `brew install lame`, provided you have [Homebrew](https://brew.sh/) installed.
-
+   If you are on Linux, make sure you have the `libasound2-dev` package installed.Additionally, you need the [libmp3lame](https://www.rarewares.org/mp3-lame-libraries.php#libmp3lame) library.On Mac OS, run `brew install lame`, provided you have [Homebrew](https://brew.sh/) installed.
 3. Build
 
    ```bash
@@ -81,7 +77,6 @@ If you want to help me accelerate this process, please feel free to contact me a
    Settings could not be loaded because of the following error: IO: NotFound No such file or directory. (os error 2)...
    ..but default settings have been created successfully. Edit them and run the program again.
    ```
-
 3. Edit the `settings.json` file
 
    The `settings.json` file is located in the following directories:
@@ -91,11 +86,11 @@ If you want to help me accelerate this process, please feel free to contact me a
 
 🎉 Now you can use DownOnSpot
 
-   ```bash
+```bash
    $ ./down_on_spot
    Usage:
    down_on_spot.exe <search_term> | <track_url> | <album_url> | <playlist_url> | <artist_url>
-   ```
+```
 
 ### ⚙️ Template variables
 
@@ -118,7 +113,6 @@ If you enabled `download_lrc`, you must set set `lrc_sp_dc` to let DownOnSpot to
 
 See [this page](https://github.com/akashrchandran/syrics/wiki/Finding-sp_dc) to find out how you can obtain your `sp_dc`.
 
-
 ## 🧭 Additional scripts
 
 - [Userscript to download titles from YouTube](https://gist.github.com/oSumAtrIX/6abf46e2ea25d32f4e6608c3c3cf837e)
@@ -127,6 +121,14 @@ See [this page](https://github.com/akashrchandran/syrics/wiki/Finding-sp_dc) to 
 
 - Slow MP3 downloads due to libmp3lame
 - Sporadic `channel error` when downloading tracks
+- Sometimes hangs
+- HTTP 429 error response (Too many requests in 30 second window)
+
+## Fixes
+
+- Can now receive playlists longer than 100 tracks
+- Local tracks don't cause a panic
+- HTTP 429 response mitigation with tracks already downloaded
 
 ## 💪 Contributors
 

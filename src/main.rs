@@ -103,6 +103,9 @@ async fn start() {
 
 	let input = args[1..].join(" ");
 
+	let timeout:u64 = ((((1.0/(180.0/60.0)) * 1000.0) * (settings.downloader.concurrent_downloads as f32)) as f32) as u64;
+	println!("timeout set to: {:?}", timeout);
+
 	let downloader = Downloader::new(settings.downloader, spotify);
 	match downloader.handle_input(&input).await {
 		Ok(search_results) => {
@@ -151,13 +154,21 @@ async fn start() {
 			let now = Instant::now();
 			let mut time_elapsed: u64;
 
+			// Number of songs to download
+			let total_down = downloader.get_downloads().await.len();
+			// Number of songs downloaded
+			let mut num_down = 0;
+
 			'outer: loop {
 				print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 				let mut exit_flag: i8 = 1;
 
 				for download in downloader.get_downloads().await {
 					let state = download.state;
-
+					
+					// Update the number of downloaded songs
+					num_down = total_down - downloader.get_downloads().await.len();
+					
 					let progress = if state != DownloadState::Done {
 						match state {
 							DownloadState::Downloading(r, t) => {
@@ -180,9 +191,12 @@ async fn start() {
 							DownloadState::Error(e) => {
 								format!("{} ", e)
 							}
-							DownloadState::Done => "Impossible state".to_string(),
+							DownloadState::Done => {
+								"Impossible state".to_string()
+							},
 						}
 					} else {
+						// num_down = num_down + 1;
 						"Done.".to_string()
 					};
 
@@ -194,9 +208,13 @@ async fn start() {
 				}
 
 				println!("\nElapsed second(s): {}", time_elapsed);
+				println!("Downloaded {} out of {}", num_down, total_down);
 				task::sleep(refresh).await
 			}
+			// Update the number of downloaded songs one last time
+			num_down = total_down - downloader.get_downloads().await.len();
 			println!("Finished download(s) in {} second(s).", time_elapsed);
+			println!("Downloaded {} out of {}", num_down, total_down);
 		}
 		Err(e) => {
 			error!("{} {}", "Handling input failed:".red(), e)

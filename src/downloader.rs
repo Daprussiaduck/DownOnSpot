@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
@@ -263,7 +264,7 @@ impl DownloaderInternal {
 		match self.download_job(job, config).await {
 			Ok(_) => {}
 			Err(e) => {
-				error!("Download job for track {} failed. {}", track_id, e);
+				error!("Download job for track {} failed. {:?}", track_id, e);
 				self.event_tx
 					.send(Message::UpdateState(
 						id,
@@ -677,6 +678,16 @@ impl DownloaderInternal {
 
 		// Don't download if we are skipping and the path exists.
 		if config.skip_existing && path.is_file() {
+			// taken from here: 
+				// https://community.spotify.com/t5/Spotify-for-Developers/Web-API-ratelimit/m-p/5503153/highlight/true#M7931
+			// which references this: 
+				// https://medium.com/mendix/limiting-your-amount-of-calls-in-mendix-most-of-the-time-rest-835dde55b10e#:~:text=The%20Spotify%20API%20service%20has,for%2060%20requests%20per%20minute
+			let max_requests_per_min = 108.0;
+			let timeout:u64 = ((((1.0/(max_requests_per_min/60.0)) * 1000.0) * (config.concurrent_downloads as f32)) as f32) as u64;
+			
+			// Limit the amount of requests to not get API timed out with HTTP status code 429 responses
+			// could also integrate the retry_after time the HTTP status code 429 response gives (IDK if RSpotify gives this on error)
+			std::thread::sleep(Duration::from_millis(timeout));
 			return Err(SpotifyError::AlreadyDownloaded);
 		}
 
@@ -931,16 +942,27 @@ impl From<rspotify::model::FullTrack> for SearchResult {
 
 impl From<rspotify::model::FullTrack> for Download {
 	fn from(val: rspotify::model::FullTrack) -> Self {
-		Download {
-			id: 0,
-			track_id: val.id.unwrap().id().to_string(),
-			title: val.name,
-			subtitle: val
-				.artists
-				.first()
-				.map(|a| a.name.to_owned())
-				.unwrap_or_default(),
-			state: DownloadState::None,
+		// Switch for local tracks in the playlist/album (because we can't download them)
+		if val.is_local == false {
+			Download {
+				id: 0,
+				track_id: val.id.unwrap().id().to_string(),
+				title: val.name,
+				subtitle: val
+					.artists
+					.first()
+					.map(|a| a.name.to_owned())
+					.unwrap_or_default(),
+				state: DownloadState::None,
+				}
+		}  else {
+			Download { // Random data, main part is the error state to not download it
+				id: 0,
+				track_id: "This should not be a valid ID".to_string(),
+				title: "Local Track: ".to_owned() + &val.name,
+				subtitle: "Invalid Track".to_string(),
+				state: DownloadState::Error("Cannot Download Local Track".to_string()),
+			}
 		}
 	}
 }
