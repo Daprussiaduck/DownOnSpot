@@ -9,7 +9,7 @@ use librespot::core::spotify_id::SpotifyId;
 use librespot::metadata::{FileFormat, Metadata, Track};
 use reqwest::StatusCode;
 use rspotify::clients::BaseClient;
-use rspotify::model::{Id, TrackId};
+use rspotify::model::{Id, IdError, TrackId};
 use sanitize_filename::sanitize;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -261,10 +261,20 @@ impl DownloaderInternal {
 	async fn download_job_wrapper(&self, job: DownloadJob, config: DownloaderConfig) {
 		let track_id = job.track_id.clone();
 		let id = job.id;
+		let num_downloads = config.concurrent_downloads;
 		match self.download_job(job, config).await {
 			Ok(_) => {}
 			Err(e) => {
 				error!("Download job for track {} failed. {:?}", track_id, e);
+				// taken from here: 
+					// https://community.spotify.com/t5/Spotify-for-Developers/Web-API-ratelimit/m-p/5503153/highlight/true#M7931
+				// which references this: 
+					// https://medium.com/mendix/limiting-your-amount-of-calls-in-mendix-most-of-the-time-rest-835dde55b10e#:~:text=The%20Spotify%20API%20service%20has,for%2060%20requests%20per%20minute
+				let max_requests_per_min = 60.0;
+				let timeout:u64 = ((((1.0/(max_requests_per_min/60.0)) * 1000.0) * (num_downloads as f32)) as f32) as u64;
+				// Limit the amount of requests to not get API timed out with HTTP status code 429 responses
+				// could also integrate the retry_after time the HTTP status code 429 response gives (IDK if RSpotify gives this on error)
+				async_std::task::sleep(Duration::from_millis(timeout)).await;
 				self.event_tx
 					.send(Message::UpdateState(
 						id,
@@ -284,6 +294,11 @@ impl DownloaderInternal {
 	) -> Result<(), SpotifyError> {
 		self.spotify.spotify.request_token().await?;
 		// Fetch metadata
+		let _trash = TrackId::from_id(&job.track_id);
+		if _trash == Err(IdError::InvalidId){
+			return Err(SpotifyError::Unavailable);
+		}
+
 		let track = self
 			.spotify
 			.spotify
@@ -678,16 +693,6 @@ impl DownloaderInternal {
 
 		// Don't download if we are skipping and the path exists.
 		if config.skip_existing && path.is_file() {
-			// taken from here: 
-				// https://community.spotify.com/t5/Spotify-for-Developers/Web-API-ratelimit/m-p/5503153/highlight/true#M7931
-			// which references this: 
-				// https://medium.com/mendix/limiting-your-amount-of-calls-in-mendix-most-of-the-time-rest-835dde55b10e#:~:text=The%20Spotify%20API%20service%20has,for%2060%20requests%20per%20minute
-			let max_requests_per_min = 108.0;
-			let timeout:u64 = ((((1.0/(max_requests_per_min/60.0)) * 1000.0) * (config.concurrent_downloads as f32)) as f32) as u64;
-			
-			// Limit the amount of requests to not get API timed out with HTTP status code 429 responses
-			// could also integrate the retry_after time the HTTP status code 429 response gives (IDK if RSpotify gives this on error)
-			std::thread::sleep(Duration::from_millis(timeout));
 			return Err(SpotifyError::AlreadyDownloaded);
 		}
 

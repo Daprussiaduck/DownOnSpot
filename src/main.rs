@@ -103,7 +103,8 @@ async fn start() {
 
 	let input = args[1..].join(" ");
 
-	let timeout:u64 = ((((1.0/(180.0/60.0)) * 1000.0) * (settings.downloader.concurrent_downloads as f32)) as f32) as u64;
+	let max_requests_per_min = 60.0;
+	let timeout:u64 = ((((1.0/(max_requests_per_min/60.0)) * 1000.0) * (1.0)) as f32) as u64;
 	println!("timeout set to: {:?}", timeout);
 
 	let downloader = Downloader::new(settings.downloader, spotify);
